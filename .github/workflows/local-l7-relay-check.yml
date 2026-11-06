@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Fork-only workflow for issue #5322. The upstream CI gates every job on
+# `github.repository == 'NVIDIA/OpenShell'`, so nothing runs in a fork. This file
+# lives only on `local/**` branches and never travels with the PR.
+
+name: local-l7-relay-check
+
+on:
+  push:
+    branches:
+      - "local/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  l7-relay:
+    name: l7 relay (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: Install clippy
+        run: rustup component add clippy
+
+      - name: Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (supervisor-network)
+        run: cargo clippy -p openshell-supervisor-network --all-targets
+
+      - name: Tests (supervisor-network lib)
+        run: cargo test -p openshell-supervisor-network --lib

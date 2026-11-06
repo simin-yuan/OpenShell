@@ -97,6 +97,22 @@ where
             }
             if !buf.is_empty() {
                 client.write_all(&buf).await.into_diagnostic()?;
+            } else {
+                // The upstream closed before sending a single response byte, which is
+                // what a server-side keep-alive timeout looks like on a reused
+                // connection. Answer with an explicit 502 so the caller sees a response
+                // instead of an unexplained close (#5322).
+                client
+                    .write_all(
+                        concat!(
+                            "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n",
+                            "Connection: close\r\n\r\n",
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .into_diagnostic()?;
+                client.flush().await.into_diagnostic()?;
             }
             return Ok(RelayOutcome::Consumed);
         }

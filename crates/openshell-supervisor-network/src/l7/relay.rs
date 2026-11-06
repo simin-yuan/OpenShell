@@ -11472,6 +11472,80 @@ network_policies:
     }
 
     #[tokio::test]
+    async fn passthrough_reports_bad_gateway_when_upstream_closes_before_responding() {
+        let policy_data = "network_policies: {}\n";
+        let engine = OpaEngine::from_strings(TEST_POLICY, policy_data).unwrap();
+        let generation_guard = engine
+            .generation_guard(engine.current_generation())
+            .unwrap();
+        let ctx = L7EvalContext {
+            host: "api.example.test".into(),
+            port: 8080,
+            request_default_port: Some(8080),
+            policy_name: "rest_api".into(),
+            binary_path: "/usr/bin/curl".into(),
+            ancestors: vec![],
+            cmdline_paths: vec![],
+            secret_resolver: None,
+            ..Default::default()
+        };
+
+        let (mut app, mut relay_client) = tokio::io::duplex(8192);
+        let (mut relay_upstream, mut upstream) = tokio::io::duplex(8192);
+        let relay = tokio::spawn(async move {
+            relay_passthrough_with_credentials(
+                &mut relay_client,
+                &mut relay_upstream,
+                &ctx,
+                &generation_guard,
+                None,
+            )
+            .await
+        });
+
+        let request = concat!(
+            "POST /mcp HTTP/1.1\r\nHost: api.example.test\r\n",
+            "Content-Length: 2\r\nConnection: keep-alive\r\n\r\n{}",
+        );
+        app.write_all(request.as_bytes()).await.unwrap();
+
+        let mut forwarded = [0u8; 512];
+        let n = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            upstream.read(&mut forwarded),
+        )
+        .await
+        .expect("passthrough request should reach upstream")
+        .unwrap();
+        assert!(String::from_utf8_lossy(&forwarded[..n]).starts_with("POST /mcp HTTP/1.1"));
+
+        // Server keep-alive timeout: the upstream closes the reused connection before
+        // writing a single response byte.
+        drop(upstream);
+
+        let mut rest = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            app.read_to_end(&mut rest),
+        )
+        .await
+        .expect("relay should finish once the upstream is gone")
+        .unwrap();
+
+        let response = String::from_utf8_lossy(&rest);
+        assert!(
+            response.starts_with("HTTP/1.1 502"),
+            "client should get an explicit 502 instead of a silent close, got: {response:?}"
+        );
+        assert!(
+            response.to_ascii_lowercase().contains("connection: close"),
+            "502 must tell the client not to reuse the connection, got: {response:?}"
+        );
+
+        let _ = relay.await;
+    }
+
+    #[tokio::test]
     async fn passthrough_relay_closes_keep_alive_tunnel_after_policy_generation_change() {
         let policy_data = "network_policies: {}\n";
         let engine = OpaEngine::from_strings(TEST_POLICY, policy_data).unwrap();
